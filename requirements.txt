@@ -1,6 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 requests
 python-dotenv
-langchain
-langchain-community
 langchain-core
+langchain-community
 langchain-groq
+langchain-huggingface
+faiss-cpu
+sentence-transformers
