@@ -229,9 +229,8 @@ class VerticalizaCache:
         q_norm = remove_accents(query.lower())
         contexto_local = []
         
-        # 🚨 GUARD RAIL 1: KILL SWITCH PARA SÍNTESE HISTÓRICA/ECONÔMICA
         palavras_proibidas = ["decada", "decadas", "seculo", "plano", "planos", "economico", "economicos", "cruze", "governo", "presidente", "politica", "inflacao"]
-        if any(word in q_norm for word in palavras_proibidas):
+        if any(re.search(fr'\b{word}\b', q_norm) for word in palavras_proibidas):
             contexto_local.append("\n[BLOQUEIO DE SEGURANÇA: O Verticaliza não realiza cruzamentos com planos econômicos ou análises históricas por década. Responda que o escopo é exclusivamente técnico.]")
         
         qtd_match = re.search(r'\b(\d+)\b', q_norm)

@@ -16,7 +16,7 @@ Mathematical Guardrails: Sorting, ranking (tallest buildings, oldest structures)
 
 Hybrid RAG (Retrieval-Augmented Generation):
 
-Structured Data: Direct mapping of GraphQL objects (PIB, IDH, Infrastructure, University Courses).
+Structured Data: Direct mapping of GraphQL objects including GDP (Gross Domestic Product), HDI (Human Development Index), Infrastructure, and University Courses.
 
 Unstructured Data: FAISS Vector Store integration for processing richContent (historical newspaper archives and long-form notes).
 
