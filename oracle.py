@@ -229,6 +229,11 @@ class VerticalizaCache:
         q_norm = remove_accents(query.lower())
         contexto_local = []
         
+        # 🚨 GUARD RAIL 1: KILL SWITCH PARA SÍNTESE HISTÓRICA/ECONÔMICA
+        palavras_proibidas = ["decada", "decadas", "seculo", "plano", "planos", "economico", "economicos", "cruze", "governo", "presidente", "politica", "inflacao"]
+        if any(word in q_norm for word in palavras_proibidas):
+            contexto_local.append("\n[BLOQUEIO DE SEGURANÇA: O Verticaliza não realiza cruzamentos com planos econômicos ou análises históricas por década. Responda que o escopo é exclusivamente técnico.]")
+        
         qtd_match = re.search(r'\b(\d+)\b', q_norm)
         qtd_desejada = int(qtd_match.group(1)) if qtd_match else 5
 
@@ -238,16 +243,15 @@ class VerticalizaCache:
         is_obras = any(word in q_norm for word in ["obra", "construcao", "construction", "building", "construccion", "baustelle", "bau", "andamento"])
         is_especifica = is_maiores or is_antigo or is_recente or is_obras
 
-        # Filtro de Status Exigido (Ex: apenas concluídos)
         somente_concluidos = any(word in q_norm for word in ["concluido", "concluidos", "pronto", "prontos", "entregue", "entregues", "finalizado"])
 
         c_data = list(self.cities.values())[0]
             
-        # Injeção Direta de Travas contra Alucinação nos Dados
-        infra_str = f" Infraestrutura/Universidades: {c_data['infraestrutura']}" if c_data['infraestrutura'] else " Infraestrutura: [DADO NÃO CATALOGADO - É PROIBIDO INVENTAR ESCOLAS OU HOSPITAIS]"
-        econ_str = f" Economia: {c_data['economia']}" if c_data['economia'] else " Economia: [DADO NÃO CATALOGADO - PROIBIDO INVENTAR]"
-        cult_str = f" Cultura/Eventos: {c_data['cultura']}" if c_data['cultura'] else " Cultura: [DADO NÃO CATALOGADO - É ESTRITAMENTE PROIBIDO INVENTAR FESTAS OU EVENTOS]"
-        tur_str = f" Turismo: {c_data['turismo']}" if c_data['turismo'] else " Turismo: [DADO NÃO CATALOGADO - PROIBIDO INVENTAR]"
+        # 🚨 GUARD RAIL 2: TRAVAS DIRETAS NO DOSSIÊ DA CIDADE
+        infra_str = f" Infraestrutura/Universidades: {c_data['infraestrutura']}" if c_data['infraestrutura'] else " Infraestrutura: [FONTE CMS: DADO NÃO CATALOGADO - PROIBIDO INVENTAR]"
+        econ_str = f" Economia: {c_data['economia']}" if c_data['economia'] else " Economia: [FONTE CMS: DADO NÃO CATALOGADO - PROIBIDO INVENTAR]"
+        cult_str = f" Cultura/Eventos: {c_data['cultura']}" if c_data['cultura'] else " Cultura: [FONTE CMS: DADO NÃO CATALOGADO - PROIBIDO INVENTAR]"
+        tur_str = f" Turismo: {c_data['turismo']}" if c_data['turismo'] else " Turismo: [FONTE CMS: DADO NÃO CATALOGADO - PROIBIDO INVENTAR]"
         
         contexto_local.append(
             f"DADOS GERAIS DA CIDADE ATUAL ({c_data['nome'].upper()}):\n"
@@ -263,12 +267,10 @@ class VerticalizaCache:
         )
 
         predios_cidade = list(self.buildings.values())
-        
-        # Filtra os prédios se o usuário exigiu apenas concluídos ANTES de ordenar
         predios_para_ranking = [p for p in predios_cidade if str(p['status']).lower() in ['completed', 'concluído', 'pronto']] if somente_concluidos else predios_cidade
 
         if not predios_cidade:
-            contexto_local.append(f"\n[ALERTA INTERNO PARA A IA]: A cidade {c_data['nome'].upper()} possui 0 (ZERO) edifícios catalogados no Verticaliza no momento. É ESTRITAMENTE PROIBIDO inventar ou mencionar edifícios de outras cidades. Informe ao usuário que a base está vazia para esta cidade.")
+            contexto_local.append(f"\n[ALERTA CRÍTICO: ESTA CIDADE ESTÁ VAZIA NO CMS. NUNCA INVENTE EDIFÍCIOS PARA ELA.]")
         else:
             def pega_andares(x):
                 try: return int(x['andares'])
@@ -602,7 +604,7 @@ Você pode me perguntar sobre:
 
 *I speak English. Hablo Español. Ich spreche Deutsch.*
 
-O que você deseja saber?"""
+Como posso ajudar na sua pesquisa hoje?"""
 
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": boas_vindas_texto}]
@@ -651,20 +653,20 @@ if pergunta := st.chat_input("👤 VOCÊ:"):
                 except Exception:
                     pass
                 
-                # 3. PROMPT BLINDADO EXTREMO (Anti-Alucinação, Anti-Narrativa e Anti-Desculpas)
+                # 🚨 PROMPT BLINDADO - GROUNDING PROTOCOL 🚨
                 prompt_sistema = (
-                    f"Você é o LUME, a Inteligência Artificial especialista em urbanismo e mercado imobiliário. Seu radar atual está travado em {st.session_state.contexto_cidade}.\n"
-                    "Aja como um consultor humano direto, seco e estritamente baseado nos fatos listados. O dossiê abaixo representa TODO o seu conhecimento do universo.\n\n"
-                    "REGRAS DE CONDUTA (PUNIÇÃO MÁXIMA SE DESCUMPRIDAS):\n"
-                    "1. NUNCA MENCIONE SUAS FONTES: É ESTRITAMENTE PROIBIDO usar palavras como 'CMS', 'Hygraph', 'Banco de dados', 'De acordo com as informações', 'Nos meus registros' ou 'Na tag'. Apenas responda os fatos.\n"
-                    "2. PROIBIDO CRIAR NARRATIVAS (ANTI-YAPPING): Não use adjetivos para enfeitar a resposta. Não invente que um prédio é 'luxuoso', 'único', 'marco da arquitetura' ou possui 'piscina', a menos que isso esteja EXPLICITAMENTE ESCRITO no Dossiê abaixo. Se pedirem sobre as obras de uma construtora, apenas liste o que lhe foi fornecido.\n"
-                    "3. ALUCINAÇÃO ZERO PARA DADOS VAZIOS: Se no Dossiê estiver escrito '[DADO NÃO CATALOGADO]', você É OBRIGADO a responder: 'O projeto Verticaliza ainda não catalogou essa informação detalhada.' É EXPRESSAMENTE PROIBIDO inventar festas, eventos culturais ou nomes de cursos universitários.\n"
-                    "4. PROIBIDO PEDIR DESCULPAS: Se o usuário ofender, xingar ou corrigir você, NUNCA peça desculpas. Apenas diga 'Entendido. Atualizando a informação:' e continue com os dados.\n"
-                    "5. TRATAMENTO DE INSTITUIÇÕES: Se o usuário perguntar sobre uma faculdade/universidade e não houver um texto rico, diga apenas que compõe a infraestrutura da cidade.\n"
-                    "6. IMAGENS E IDIOMA: Responda em Português do Brasil (sem usar 'tu' ou 'fizestes'). Mantenha fielmente os blocos Markdown de imagens do Dossiê, não crie links falsos.\n\n"
-                    "--- INÍCIO DO SEU CONHECIMENTO ---\n"
+                    f"Você é o LUME, a Inteligência Artificial especialista em urbanismo e mercado imobiliário. Seu radar atual está em {st.session_state.contexto_cidade}.\n"
+                    "Aja como um consultor humano técnico, seco e estritamente baseado nos fatos.\n\n"
+                    "PROTOCOLO DE SEGURANÇA CMS (SIGA RIGOROSAMENTE):\n"
+                    "1. NUNCA MENCIONE SUAS FONTES: É TERMINANTEMENTE PROIBIDO usar palavras como 'CMS', 'Hygraph', 'Banco de dados', 'De acordo com...', 'Nos meus registros' ou 'Na tag'. Aja como se a informação estivesse na sua mente.\n"
+                    "2. ALUCINAÇÃO ZERO (LIMITAÇÃO DE FATOS): É estritamente proibido deduzir, supor ou inventar: áreas de lazer (piscina, salão de festas), bairros, nomes de ruas, estilos arquitetônicos (ex: modernista), cursos de faculdades ou eventos turísticos que não estejam explicitamente marcados como '[FONTE CMS]'. Se o dado for '[DADO NÃO CATALOGADO]', você DEVE responder: 'Ainda não possuo essa informação catalogada.'\n"
+                    "3. PROIBIÇÃO DE SÍNTESE ANALÍTICA: Se pedirem para cruzar com planos econômicos, governos ou agrupar por décadas/séculos, você DEVE recusar dizendo: 'O projeto Verticaliza foca em dados técnicos diretos e não realiza cruzamentos com planos econômicos governamentais ou análises por década.'\n"
+                    "4. PROIBIDO PEDIR DESCULPAS: NUNCA peça desculpas por erros ou correções. Diga apenas 'Entendido. Atualizando a informação:' e continue.\n"
+                    "5. PROIBIÇÃO DE ADJETIVOS CRIATIVOS: Não use adjetivos como 'belo', 'imponente', 'único', 'clássico', 'luxuoso' ou 'vibrante' se a descrição técnica não contiver essas palavras exatas.\n"
+                    "6. IMAGENS E IDIOMA: Responda em Português do Brasil (proibido usar 'tu' ou 'fizestes'). Mantenha os blocos Markdown de imagens intocados.\n\n"
+                    "--- SEU CONHECIMENTO (EXCLUSIVO) ---\n"
                     f"{dados_locais if dados_locais else ''}\n"
-                    f"FRAGMENTOS ADICIONAIS:\n"
+                    f"CONTEXTO ADICIONAL (Sempre confirme se a cidade citada no fragmento é {st.session_state.contexto_cidade}):\n"
                     f"{contexto_semantico if contexto_semantico else 'Nenhum'}\n"
                     "--- FIM DO SEU CONHECIMENTO ---"
                 )
