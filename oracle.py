@@ -13,10 +13,9 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
-# Configuração da UI (deve ser o primeiro comando do Streamlit)
-st.set_page_config(page_title="Verticaliza LUME", page_icon="🏛️", layout="centered")
+# Configuração da UI
+st.set_page_config(page_title="Verticaliza LUME", page_icon="🏛️", layout="wide")
 
-# Força o terminal a lidar com caracteres estranhos (útil para logs no backend)
 if sys.stdout.encoding.lower() != 'utf-8':
     try:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -37,7 +36,7 @@ def sanitize_text(text):
     return clean_text.encode('utf-8', 'ignore').decode('utf-8')
 
 def remove_accents(input_str):
-    nfkd_form = unicodedata.normalize('NFKD', input_str)
+    nfkd_form = unicodedata.normalize('NFKD', str(input_str))
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def safe_json_parse(field, default_val=None):
@@ -58,7 +57,6 @@ def format_value(val, suffix=""):
     return f"{val}{suffix}"
 
 def format_large_number(num):
-    """Formata números grandes para leitura fácil (ex: bilhões, milhões, milhares)."""
     try:
         if num is None or str(num).strip() == "":
             return "Não informado"
@@ -73,13 +71,29 @@ def format_large_number(num):
     except:
         return str(num)
 
-def fetch_hygraph_data():
+# === BUSCA APENAS AS CIDADES (RÁPIDO E LEVE) ===
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_base_cities():
     headers = {"Authorization": f"Bearer {HYGRAPH_TOKEN}"}
     query = """
     query {
       cities(stage: PUBLISHED, first: 1000) { 
-        name state region population area gdp gdpPerCapita averageIncome medianIncome idh geoloc { latitude longitude } infrastructure culture tourism economy state
+        name slug state region population area gdp gdpPerCapita averageIncome medianIncome idh geoloc { latitude longitude } infrastructure culture tourism economy state
       }
+    }
+    """
+    try:
+        response = requests.post(HYGRAPH_URL, json={'query': query}, headers=headers)
+        return response.json().get('data', {}).get('cities', [])
+    except Exception as e:
+        st.error(f"❌ Erro ao consultar as cidades base: {e}")
+        return []
+
+# === BUSCA TODAS AS ENTIDADES PARA FILTRAGEM SEGURA EM PYTHON ===
+def fetch_all_entities():
+    headers = {"Authorization": f"Bearer {HYGRAPH_TOKEN}"}
+    query = """
+    query {
       constructors(stage: PUBLISHED, first: 1000) { 
         name city companyStatus website foundedYear description address phone email employees crea cnpj
       }
@@ -92,6 +106,7 @@ def fetch_hygraph_data():
         currentImages { url }
         historicalImages { url }
         floorPlanImages { url }
+        richContent { text }
       }
     }
     """
@@ -99,15 +114,15 @@ def fetch_hygraph_data():
         response = requests.post(HYGRAPH_URL, json={'query': query}, headers=headers)
         res_json = response.json()
         if 'errors' in res_json:
-            print("\n❌ O Hygraph rejeitou a query.")
-            return None
+            st.error(f"❌ Erro do Hygraph: {res_json['errors'][0].get('message')}")
+            return {}
         return res_json.get('data', {})
     except Exception as e:
-        print(f"❌ Erro ao consultar a base de dados: {e}")
-        return None
+        st.error(f"❌ Erro de rede ao consultar entidades: {e}")
+        return {}
 
 # =====================================================================
-# 🧠 CÉREBRO LOCAL (IN-MEMORY CACHE E BUSCA EXATA)
+# 🧠 CÉREBRO LOCAL (FOCADO EM APENAS 1 CIDADE)
 # =====================================================================
 class VerticalizaCache:
     def __init__(self, data):
@@ -120,51 +135,19 @@ class VerticalizaCache:
         self._calculate_aggregates()
 
     def _build_cache(self, data):
-        for ed in data.get('condominiums', []):
-            specs = safe_json_parse(ed.get('specifications'))
-            team = safe_json_parse(ed.get('team'))
-            timeline = safe_json_parse(ed.get('timeline'))
-            
-            raw_constructors = team.get('constructors', [])
-            cons_names = [c.get('name', str(c)) if isinstance(c, dict) else str(c) for c in raw_constructors]
-            
-            cover = ed.get('coverImage') or {}
-            current = ed.get('currentImages') or []
-            historical = ed.get('historicalImages') or []
-            floor_plans = ed.get('floorPlanImages') or []
-            
-            # Formata o arquiteto de forma mais robusta
-            arq_data = team.get('architect', {})
-            arquiteto_nome = arq_data.get('name') if isinstance(arq_data, dict) else arq_data
-            
-            self.buildings[ed.get('name')] = {
-                "nome": ed.get('name'),
-                "cidade": ed.get('city'),
-                "status": ed.get('buildingStatus', 'Não informado'),
-                "segmento": ed.get('segment', 'Não informado'),
-                "tipo": ed.get('type', 'Não informado'),
-                "andares": specs.get('floors', 0),
-                "quartos": specs.get('bedrooms', 0),
-                "area": specs.get('unitArea', 0),
-                "construtoras": cons_names,
-                "arquiteto": arquiteto_nome if arquiteto_nome else 'Não informado',
-                "timeline": timeline,
-                "cover_url": cover.get('url') if cover else "",
-                "current_urls": [img.get('url') for img in current if img.get('url')],
-                "historical_urls": [img.get('url') for img in historical if img.get('url')],
-                "floor_plan_urls": [img.get('url') for img in floor_plans if img.get('url')]
-            }
-
         for c in data.get('cities', []):
             self.cities[c.get('name')] = {
                 "nome": c.get('name'),
+                "slug": c.get('slug', ''),
                 "populacao": c.get('population'),
                 "pib": c.get('gdp'),
+                "idh": c.get('idh', 'Não catalogado'),
+                "area": c.get('area', 'Não catalogada'),
                 "infraestrutura": c.get('infrastructure', ''),
                 "economia": c.get('economy', ''),
                 "cultura": c.get('culture', ''),
                 "turismo": c.get('tourism', ''),
-                "total_edificios": 0 
+                "total_edificios": len(data.get('condominiums', []))
             }
 
         for co in data.get('constructors', []):
@@ -175,17 +158,70 @@ class VerticalizaCache:
                 "obras": []
             }
 
+        for ed in data.get('condominiums', []):
+            specs = safe_json_parse(ed.get('specifications'))
+            team = safe_json_parse(ed.get('team'))
+            timeline = safe_json_parse(ed.get('timeline'))
+            address = safe_json_parse(ed.get('address'))
+            seo = safe_json_parse(ed.get('seo'))
+            
+            raw_constructors = team.get('constructors', [])
+            cons_names = [c.get('name', str(c)) if isinstance(c, dict) else str(c) for c in raw_constructors]
+            
+            cover = ed.get('coverImage') or {}
+            current = ed.get('currentImages') or []
+            historical = ed.get('historicalImages') or []
+            floor_plans = ed.get('floorPlanImages') or []
+            
+            rich_content = ed.get('richContent') or {}
+            historia_rica = rich_content.get('text', '') if isinstance(rich_content, dict) else ""
+            notas_historicas = ed.get('historicalNotes', [])
+            notas_str = " ".join(notas_historicas) if notas_historicas else ""
+            
+            rua = address.get('street', '')
+            num = address.get('number', '')
+            bairro = address.get('neighborhood', '')
+            endereco_completo = f"{rua}, {num} - Bairro {bairro}".strip(" ,-")
+            
+            arq_data = team.get('architect', {})
+            arquiteto_nome = arq_data.get('name') if isinstance(arq_data, dict) else arq_data
+            eng_estrutural = team.get('structuralEngineer', {}).get('name', '') if isinstance(team.get('structuralEngineer'), dict) else ''
+            
+            nome_ed = ed.get('name')
+            self.buildings[nome_ed] = {
+                "nome": nome_ed,
+                "cidade": ed.get('city'),
+                "status": ed.get('buildingStatus', 'Não informado'),
+                "segmento": ed.get('segment', 'Não informado'),
+                "tipo": ed.get('type', 'Não informado'),
+                "endereco": endereco_completo,
+                "andares": specs.get('floors', 0),
+                "quartos": specs.get('bedrooms', 0),
+                "area": specs.get('unitArea', 0),
+                "construtoras": cons_names,
+                "arquiteto": arquiteto_nome if arquiteto_nome else 'Não informado',
+                "eng_estrutural": eng_estrutural,
+                "timeline": timeline,
+                "historia": historia_rica,
+                "notas": notas_str,
+                "seo_desc": seo.get('description', ''),
+                "cover_url": cover.get('url') if cover else "",
+                "current_urls": [img.get('url') for img in current if img.get('url')],
+                "historical_urls": [img.get('url') for img in historical if img.get('url')],
+                "floor_plan_urls": [img.get('url') for img in floor_plans if img.get('url')]
+            }
+
     def _calculate_aggregates(self):
+        cidade_ativa = list(self.cities.keys())[0] if self.cities else None
+        
         for b_key, b_data in self.buildings.items():
-            cidade_nome = str(b_data['cidade']).lower()
-            for c_key, c_val in self.cities.items():
-                if c_val['nome'].lower() == cidade_nome:
-                    self.cities[c_key]['total_edificios'] += 1
+            if cidade_ativa:
+                self.cities[cidade_ativa]['total_edificios'] = len(self.buildings)
             
             for c_name in b_data['construtoras']:
-                c_name_lower = str(c_name).lower()
+                c_name_lower = remove_accents(str(c_name).lower().strip())
                 for co_key, co_val in self.constructors.items():
-                    if co_val['nome'].lower() == c_name_lower:
+                    if remove_accents(co_val['nome'].lower().strip()) == c_name_lower:
                         self.constructors[co_key]['total_obras'] += 1
                         self.constructors[co_key]['obras'].append(b_data['nome'])
 
@@ -193,157 +229,181 @@ class VerticalizaCache:
         q_norm = remove_accents(query.lower())
         contexto_local = []
         
-        # Extrai a quantidade desejada pelo usuário (ex: "os 10 maiores", "top 3")
         qtd_match = re.search(r'\b(\d+)\b', q_norm)
         qtd_desejada = int(qtd_match.group(1)) if qtd_match else 5
 
-        # 1. Checa Menções a Cidades
-        cidade_mencionada = None
-        for c_key, c_data in self.cities.items():
-            if remove_accents(c_data['nome'].lower()) in q_norm:
-                cidade_mencionada = c_key
-                break
+        is_maiores = any(word in q_norm for word in ["maior", "alto", "top", "tall", "high", "big", "mayor", "hoch", "gros"])
+        is_antigo = any(word in q_norm for word in ["antigo", "velho", "primeiro", "old", "first", "antiguo", "primer", "alt", "erste"])
+        is_recente = any(word in q_norm for word in ["recente", "novo", "ultima", "ultimo", "recent", "new", "latest", "reciente", "nuevo", "neu", "letzte"])
+        is_obras = any(word in q_norm for word in ["obra", "construcao", "construction", "building", "construccion", "baustelle", "bau", "andamento"])
+        is_especifica = is_maiores or is_antigo or is_recente or is_obras
 
-        if cidade_mencionada:
-            c_data = self.cities[cidade_mencionada]
-            
-            # Textos ricos para infraestrutura e afins
-            infra_str = f" Infraestrutura: {c_data['infraestrutura']}." if c_data['infraestrutura'] else " Infraestrutura: Sem dados catalogados."
-            econ_str = f" Economia: {c_data['economia']}." if c_data['economia'] else " Economia: Sem dados catalogados."
-            cult_str = f" Cultura/Eventos: {c_data['cultura']}." if c_data['cultura'] else " Cultura: Sem dados catalogados."
-            
-            contexto_local.append(
-                f"DADOS GERAIS DA CIDADE {c_data['nome'].upper()}:\n"
-                f"- População: {format_large_number(c_data['populacao'])}\n"
-                f"- PIB: R$ {format_large_number(c_data['pib'])}\n"
-                f"- Edifícios monitorados: {c_data['total_edificios']}\n"
-                f"- Infraestrutura (escolas, universidades, hospitais, internet): {infra_str}\n"
-                f"- Economia: {econ_str}\n"
-                f"- Cultura e Eventos: {cult_str}\n"
-                f"- Turismo: {c_data['turismo'] or 'Sem dados catalogados'}"
-            )
+        # Filtro de Status Exigido (Ex: apenas concluídos)
+        somente_concluidos = any(word in q_norm for word in ["concluido", "concluidos", "pronto", "prontos", "entregue", "entregues", "finalizado"])
 
-            # === PANORAMA IMOBILIÁRIO AUTOMÁTICO ===
-            predios_cidade = [b for b in self.buildings.values() if str(b['cidade']).lower() == str(self.cities[cidade_mencionada]['nome']).lower()]
+        c_data = list(self.cities.values())[0]
             
-            if predios_cidade:
-                def pega_andares(x):
-                    try: return int(x['andares'])
-                    except: return 0
+        # Injeção Direta de Travas contra Alucinação nos Dados
+        infra_str = f" Infraestrutura/Universidades: {c_data['infraestrutura']}" if c_data['infraestrutura'] else " Infraestrutura: [DADO NÃO CATALOGADO - É PROIBIDO INVENTAR ESCOLAS OU HOSPITAIS]"
+        econ_str = f" Economia: {c_data['economia']}" if c_data['economia'] else " Economia: [DADO NÃO CATALOGADO - PROIBIDO INVENTAR]"
+        cult_str = f" Cultura/Eventos: {c_data['cultura']}" if c_data['cultura'] else " Cultura: [DADO NÃO CATALOGADO - É ESTRITAMENTE PROIBIDO INVENTAR FESTAS OU EVENTOS]"
+        tur_str = f" Turismo: {c_data['turismo']}" if c_data['turismo'] else " Turismo: [DADO NÃO CATALOGADO - PROIBIDO INVENTAR]"
+        
+        contexto_local.append(
+            f"DADOS GERAIS DA CIDADE ATUAL ({c_data['nome'].upper()}):\n"
+            f"- População: {format_large_number(c_data['populacao'])}\n"
+            f"- PIB: R$ {format_large_number(c_data['pib'])}\n"
+            f"- IDH: {c_data['idh']}\n"
+            f"- Área: {c_data['area']} km²\n"
+            f"- Edifícios monitorados no Verticaliza: {c_data['total_edificios']}\n"
+            f"- {infra_str}\n"
+            f"- {econ_str}\n"
+            f"- {cult_str}\n"
+            f"- {tur_str}"
+        )
+
+        predios_cidade = list(self.buildings.values())
+        
+        # Filtra os prédios se o usuário exigiu apenas concluídos ANTES de ordenar
+        predios_para_ranking = [p for p in predios_cidade if str(p['status']).lower() in ['completed', 'concluído', 'pronto']] if somente_concluidos else predios_cidade
+
+        if not predios_cidade:
+            contexto_local.append(f"\n[ALERTA INTERNO PARA A IA]: A cidade {c_data['nome'].upper()} possui 0 (ZERO) edifícios catalogados no Verticaliza no momento. É ESTRITAMENTE PROIBIDO inventar ou mencionar edifícios de outras cidades. Informe ao usuário que a base está vazia para esta cidade.")
+        else:
+            def pega_andares(x):
+                try: return int(x['andares'])
+                except: return 0
+            
+            def pega_ano(x):
+                t = x.get('timeline', {})
+                textos = [str(t.get('completion', '')), str(t.get('constructionStart', '')), str(t.get('announced', ''))]
+                for texto in textos:
+                    anos = re.findall(r'\b(19\d{2}|20\d{2})\b', texto)
+                    if anos: return int(anos[0])
+                return 9999 
+            
+            def pega_ano_desc(x):
+                t = x.get('timeline', {})
+                textos = [str(t.get('completion', '')), str(t.get('constructionStart', '')), str(t.get('announced', ''))]
+                for texto in textos:
+                    anos = re.findall(r'\b(19\d{2}|20\d{2})\b', texto)
+                    if anos: return int(anos[0])
+                return 0
+
+            # Gerador de Dossiê Panorama
+            if not is_especifica and ("edificio" in q_norm or "predio" in q_norm or remove_accents(c_data['nome'].lower()) in q_norm):
+                concluidos = sum(1 for p in predios_cidade if str(p['status']).lower() in ['completed', 'concluído', 'pronto'])
+                em_obras = sum(1 for p in predios_cidade if str(p['status']).lower() in ['construction', 'em obras', 'under_construction', 'planned'])
                 
-                def pega_ano(x):
-                    t = x.get('timeline', {})
-                    textos = [str(t.get('completion', '')), str(t.get('constructionStart', '')), str(t.get('announced', ''))]
-                    for texto in textos:
-                        anos = re.findall(r'\b(19\d{2}|20\d{2})\b', texto)
-                        if anos: return int(anos[0])
-                    return 9999 
-
-                is_especifica = any(word in q_norm for word in ["maiores", "altos", "antigo", "velho", "primeiro", "obras", "construcao"])
-
-                if not is_especifica:
-                    concluidos = sum(1 for p in predios_cidade if str(p['status']).lower() in ['completed', 'concluído', 'pronto'])
-                    em_obras = sum(1 for p in predios_cidade if str(p['status']).lower() in ['construction', 'em obras', 'under_construction', 'planned'])
+                construtoras_cidade = {}
+                arquitetos_cidade = {}
+                
+                for p in predios_cidade:
+                    for c in p['construtoras']:
+                        if c and c.lower() not in ['não informado', 'não informada', 'n/a', '']:
+                            construtoras_cidade[c] = construtoras_cidade.get(c, 0) + 1
                     
-                    construtoras_cidade = {}
-                    arquitetos_cidade = {}
+                    arq = p['arquiteto']
+                    if arq and arq.lower() not in ['não informado', 'não informada', 'n/a', '']:
+                        arquitetos_cidade[arq] = arquitetos_cidade.get(arq, 0) + 1
+
+                top_construtoras = sorted(construtoras_cidade.items(), key=lambda x: x[1], reverse=True)[:3]
+                top_arquitetos = sorted(arquitetos_cidade.items(), key=lambda x: x[1], reverse=True)[:3]
+
+                top_const_str = ", ".join([f"{c[0]} ({c[1]} obras)" for c in top_construtoras]) if top_construtoras else "Ainda não catalogadas"
+                top_arq_str = ", ".join([f"{a[0]} ({a[1]} projetos)" for a in top_arquitetos]) if top_arquitetos else "Ainda não catalogados"
+
+                resumo = (
+                    f"\nPANORAMA IMOBILIÁRIO DE {c_data['nome'].upper()}:\n"
+                    f"- Total de edifícios monitorados: {len(predios_cidade)} ({concluidos} concluídos, {em_obras} em projeto/obras).\n"
+                    f"- Construtoras com mais presença na base: {top_const_str}.\n"
+                    f"- Arquitetos mais catalogados: {top_arq_str}.\n"
+                )
+                
+                mais_alto = sorted(predios_cidade, key=pega_andares, reverse=True)[0] if predios_cidade else None
+                mais_antigo = sorted(predios_cidade, key=pega_ano)[0] if predios_cidade else None
+
+                if mais_alto and pega_andares(mais_alto) > 0:
+                    img_alto = f" ![Fachada]({mais_alto['cover_url']})" if mais_alto['cover_url'] else ""
+                    resumo += f"- Edifício mais alto: {mais_alto['nome']} ({format_value(mais_alto['andares'])} andares | Segmento: {mais_alto['segmento']} | Quartos: {format_value(mais_alto['quartos'])} | Construtora: {', '.join(mais_alto['construtoras']) if mais_alto['construtoras'] else 'Não informada'} | Status: {mais_alto['status']}).{img_alto}\n"
+                
+                if mais_antigo:
+                    ano_antigo = pega_ano(mais_antigo)
+                    if ano_antigo != 9999:
+                        img_antigo = f" ![Fachada]({mais_antigo['cover_url']})" if mais_antigo['cover_url'] else ""
+                        resumo += f"- Edifício mais antigo registrado: {mais_antigo['nome']} (Ano referência: {ano_antigo} | Segmento: {mais_antigo['segmento']} | Construtora: {', '.join(mais_antigo['construtoras']) if mais_antigo['construtoras'] else 'Não informada'} | Status: {mais_antigo['status']}).{img_antigo}\n"
+
+                contexto_local.append(resumo)
+
+            if is_maiores and not any(remove_accents(c.lower()) in q_norm for c in self.constructors):
+                predios_ordenados = sorted(predios_para_ranking, key=pega_andares, reverse=True)[:qtd_desejada]
+                contexto_local.append(f"\nOS {len(predios_ordenados)} MAIORES EDIFÍCIOS EM {c_data['nome'].upper()}:")
+                for i, p in enumerate(predios_ordenados, 1):
+                    contexto_local.append(f"{i}. {p['nome']} - {format_value(p['andares'])} andares | Construtora: {', '.join(p['construtoras']) if p['construtoras'] else 'Não informada'} | Status: {p['status']}")
                     
-                    for p in predios_cidade:
-                        for c in p['construtoras']:
-                            if c and c.lower() not in ['não informado', 'não informada', 'n/a', '']:
-                                construtoras_cidade[c] = construtoras_cidade.get(c, 0) + 1
-                        
-                        arq = p['arquiteto']
-                        if arq and arq.lower() not in ['não informado', 'não informada', 'n/a', '']:
-                            arquitetos_cidade[arq] = arquitetos_cidade.get(arq, 0) + 1
+            if is_antigo and not any(remove_accents(c.lower()) in q_norm for c in self.constructors):
+                predios_ordenados = sorted(predios_para_ranking, key=pega_ano)[:qtd_desejada]
+                contexto_local.append(f"\nOS {len(predios_ordenados)} EDIFÍCIOS MAIS ANTIGOS EM {c_data['nome'].upper()}:")
+                for i, p in enumerate(predios_ordenados, 1):
+                    ano = pega_ano(p)
+                    ano_str = ano if ano != 9999 else "Data desconhecida"
+                    contexto_local.append(f"{i}. {p['nome']} - Ano/Referência: {ano_str} | {format_value(p['andares'])} andares | Construtora: {', '.join(p['construtoras']) if p['construtoras'] else 'Não informada'} | Status: {p['status']}")
 
-                    top_construtoras = sorted(construtoras_cidade.items(), key=lambda x: x[1], reverse=True)[:3]
-                    top_arquitetos = sorted(arquitetos_cidade.items(), key=lambda x: x[1], reverse=True)[:3]
+            if is_recente and not any(remove_accents(c.lower()) in q_norm for c in self.constructors):
+                predios_ordenados = sorted(predios_para_ranking, key=pega_ano_desc, reverse=True)[:qtd_desejada]
+                contexto_local.append(f"\nOS {len(predios_ordenados)} EDIFÍCIOS MAIS RECENTES EM {c_data['nome'].upper()}:")
+                for i, p in enumerate(predios_ordenados, 1):
+                    ano = pega_ano_desc(p)
+                    ano_str = ano if ano != 0 else "Data desconhecida"
+                    contexto_local.append(f"{i}. {p['nome']} - Ano/Referência: {ano_str} | {format_value(p['andares'])} andares | Construtora: {', '.join(p['construtoras']) if p['construtoras'] else 'Não informada'} | Status: {p['status']}")
 
-                    top_const_str = ", ".join([f"{c[0]} ({c[1]} obras)" for c in top_construtoras]) if top_construtoras else "Ainda não catalogadas"
-                    top_arq_str = ", ".join([f"{a[0]} ({a[1]} projetos)" for a in top_arquitetos]) if top_arquitetos else "Ainda não catalogados"
-
-                    mais_alto = sorted(predios_cidade, key=pega_andares, reverse=True)[0] if predios_cidade else None
-                    mais_antigo = sorted(predios_cidade, key=pega_ano)[0] if predios_cidade else None
-
-                    resumo = (
-                        f"\nPANORAMA IMOBILIÁRIO DE {c_data['nome'].upper()}:\n"
-                        f"- Total de edifícios monitorados: {len(predios_cidade)} ({concluidos} concluídos, {em_obras} em projeto/obras).\n"
-                        f"- Construtoras com mais presença na base: {top_const_str}.\n"
-                        f"- Arquitetos mais catalogados: {top_arq_str}.\n"
-                    )
-                    
-                    if mais_alto and pega_andares(mais_alto) > 0:
-                        img_alto = f" ![Fachada]({mais_alto['cover_url']})" if mais_alto['cover_url'] else ""
-                        resumo += f"- Edifício mais alto: {mais_alto['nome']} ({format_value(mais_alto['andares'])} andares | Segmento: {mais_alto['segmento']} | Quartos: {format_value(mais_alto['quartos'])} | Construtora: {', '.join(mais_alto['construtoras']) if mais_alto['construtoras'] else 'Não informada'} | Status: {mais_alto['status']}).{img_alto}\n"
-                    
-                    if mais_antigo:
-                        ano_antigo = pega_ano(mais_antigo)
-                        if ano_antigo != 9999:
-                            img_antigo = f" ![Fachada]({mais_antigo['cover_url']})" if mais_antigo['cover_url'] else ""
-                            resumo += f"- Edifício mais antigo registrado: {mais_antigo['nome']} (Ano referência: {ano_antigo} | Segmento: {mais_antigo['segmento']} | Construtora: {', '.join(mais_antigo['construtoras']) if mais_antigo['construtoras'] else 'Não informada'} | Status: {mais_antigo['status']}).{img_antigo}\n"
-
-                    contexto_local.append(resumo)
-
-                if "maiores" in q_norm or "mais altos" in q_norm:
-                    predios_ordenados = sorted(predios_cidade, key=pega_andares, reverse=True)[:qtd_desejada]
-                    contexto_local.append(f"\nOS {len(predios_ordenados)} MAIORES EDIFÍCIOS EM {self.cities[cidade_mencionada]['nome'].upper()}:")
-                    for i, p in enumerate(predios_ordenados, 1):
-                        contexto_local.append(
-                            f"{i}. {p['nome']} - {format_value(p['andares'])} andares | "
-                            f"Segmento: {p['segmento']} | Quartos: {format_value(p['quartos'])} | Área: {format_value(p['area'], 'm²')} | "
-                            f"Construtora: {', '.join(p['construtoras']) if p['construtoras'] else 'Não informada'} | Status: {p['status']}"
-                        )
-                        
-                if "antigo" in q_norm or "velho" in q_norm or "primeiro" in q_norm:
-                    predios_ordenados = sorted(predios_cidade, key=pega_ano)[:qtd_desejada]
-                    contexto_local.append(f"\nOS {len(predios_ordenados)} EDIFÍCIOS MAIS ANTIGOS EM {self.cities[cidade_mencionada]['nome'].upper()}:")
-                    for i, p in enumerate(predios_ordenados, 1):
-                        ano = pega_ano(p)
-                        ano_str = ano if ano != 9999 else "Data desconhecida"
-                        contexto_local.append(
-                            f"{i}. {p['nome']} - Ano/Referência: {ano_str} | {format_value(p['andares'])} andares | "
-                            f"Segmento: {p['segmento']} | Construtora: {', '.join(p['construtoras']) if p['construtoras'] else 'Não informada'} | "
-                            f"Status: {p['status']}"
-                        )
-
-                if "obras" in q_norm or "construcao" in q_norm:
-                    status_obras = ['construção', 'em obras', 'under_construction', 'construction']
-                    predios_obras = [b for b in predios_cidade if str(b['status']).lower() in status_obras]
-                    
-                    if predios_obras:
-                        contexto_local.append(f"\nEDIFÍCIOS EM CONSTRUÇÃO EM {self.cities[cidade_mencionada]['nome'].upper()}:")
-                        for p in predios_obras:
-                            contexto_local.append(
-                                f"- {p['nome']} ({format_value(p['andares'])} andares | "
-                                f"Segmento: {p['segmento']} | Construtora: {', '.join(p['construtoras']) if p['construtoras'] else 'Não informada'})"
-                            )
-                    else:
-                        contexto_local.append(f"\nNão há edifícios em construção registrados em {self.cities[cidade_mencionada]['nome']}.")
+            if is_obras and not any(remove_accents(c.lower()) in q_norm for c in self.constructors):
+                status_obras = ['construção', 'em obras', 'under_construction', 'construction', 'planned']
+                predios_obras = [b for b in predios_cidade if str(b['status']).lower() in status_obras]
+                if predios_obras:
+                    contexto_local.append(f"\nEDIFÍCIOS EM CONSTRUÇÃO EM {c_data['nome'].upper()}:")
+                    for p in predios_obras:
+                        contexto_local.append(f"- {p['nome']} ({format_value(p['andares'])} andares | Construtora: {', '.join(p['construtoras']) if p['construtoras'] else 'Não informada'})")
+                else:
+                    contexto_local.append(f"\nNão há edifícios em construção registrados em {c_data['nome'].upper()}.")
 
         # 2. Checa Menções a Construtoras e Top N da Construtora
         for c_key, c_data in self.constructors.items():
             if remove_accents(c_data['nome'].lower()) in q_norm:
-                contexto_local.append(
-                    f"\nDADOS DA CONSTRUTORA '{c_data['nome']}':\n"
-                    f"- Obras registradas na base: {c_data['total_obras']}\n"
-                    f"- Principais Obras: {', '.join(c_data['obras'][:10])}."
-                )
+                if c_data['total_obras'] > 0:
+                    # Injeta Mini-Dossiês para as obras
+                    obras_detalhes = []
+                    for nome_obra in c_data['obras'][:10]:
+                        if nome_obra in self.buildings:
+                            b = self.buildings[nome_obra]
+                            obras_detalhes.append(f"{b['nome']} (Status: {b['status']} | {format_value(b['andares'])} andares)")
+                        else:
+                            obras_detalhes.append(nome_obra)
+
+                    contexto_local.append(
+                        f"\nDADOS DA CONSTRUTORA '{c_data['nome']}':\n"
+                        f"- Obras registradas na base local: {c_data['total_obras']}\n"
+                        f"- Resumo das Principais Obras: {', '.join(obras_detalhes)}."
+                    )
                 
-                if "maiores" in q_norm or "mais altos" in q_norm:
+                if is_maiores:
                     predios_const = [self.buildings[nome] for nome in c_data['obras'] if nome in self.buildings]
+                    predios_const_filtrados = [p for p in predios_const if str(p['status']).lower() in ['completed', 'concluído', 'pronto']] if somente_concluidos else predios_const
+                    
                     def pega_andares_c(x):
                         try: return int(x['andares'])
                         except: return 0
                     
-                    predios_ord = sorted(predios_const, key=pega_andares_c, reverse=True)[:qtd_desejada]
+                    predios_ord = sorted(predios_const_filtrados, key=pega_andares_c, reverse=True)[:qtd_desejada]
                     if predios_ord:
                         contexto_local.append(f"\nOS {len(predios_ord)} MAIORES EDIFÍCIOS DA CONSTRUTORA {c_data['nome'].upper()}:")
                         for i, p in enumerate(predios_ord, 1):
                             contexto_local.append(f"{i}. {p['nome']} - {format_value(p['andares'])} andares (Status: {p['status']})")
                             
-                if "antigo" in q_norm or "velho" in q_norm or "primeiro" in q_norm:
+                if is_antigo:
                     predios_const = [self.buildings[nome] for nome in c_data['obras'] if nome in self.buildings]
+                    predios_const_filtrados = [p for p in predios_const if str(p['status']).lower() in ['completed', 'concluído', 'pronto']] if somente_concluidos else predios_const
+                    
                     def pega_ano_c(x):
                         t = x.get('timeline', {})
                         textos = [str(t.get('completion', '')), str(t.get('constructionStart', '')), str(t.get('announced', ''))]
@@ -352,7 +412,7 @@ class VerticalizaCache:
                             if anos: return int(anos[0])
                         return 9999 
                     
-                    predios_ord = sorted(predios_const, key=pega_ano_c)[:qtd_desejada]
+                    predios_ord = sorted(predios_const_filtrados, key=pega_ano_c)[:qtd_desejada]
                     if predios_ord:
                         contexto_local.append(f"\nOS {len(predios_ord)} EDIFÍCIOS MAIS ANTIGOS DA CONSTRUTORA {c_data['nome'].upper()}:")
                         for i, p in enumerate(predios_ord, 1):
@@ -360,7 +420,27 @@ class VerticalizaCache:
                             ano_str = ano if ano != 9999 else "Data desconhecida"
                             contexto_local.append(f"{i}. {p['nome']} - Ano: {ano_str} (Status: {p['status']})")
 
-        # 3. Checa Menções a Edifícios Específicos
+                if is_recente:
+                    predios_const = [self.buildings[nome] for nome in c_data['obras'] if nome in self.buildings]
+                    predios_const_filtrados = [p for p in predios_const if str(p['status']).lower() in ['completed', 'concluído', 'pronto']] if somente_concluidos else predios_const
+                    
+                    def pega_ano_c_desc(x):
+                        t = x.get('timeline', {})
+                        textos = [str(t.get('completion', '')), str(t.get('constructionStart', '')), str(t.get('announced', ''))]
+                        for texto in textos:
+                            anos = re.findall(r'\b(19\d{2}|20\d{2})\b', texto)
+                            if anos: return int(anos[0])
+                        return 0 
+                    
+                    predios_ord = sorted(predios_const_filtrados, key=pega_ano_c_desc, reverse=True)[:qtd_desejada]
+                    if predios_ord:
+                        contexto_local.append(f"\nAS {len(predios_ord)} OBRAS MAIS RECENTES DA CONSTRUTORA {c_data['nome'].upper()}:")
+                        for i, p in enumerate(predios_ord, 1):
+                            ano = pega_ano_c_desc(p)
+                            ano_str = ano if ano != 0 else "Data desconhecida"
+                            contexto_local.append(f"{i}. {p['nome']} - Ano: {ano_str} (Status: {p['status']})")
+
+        # 3. Checa Menções a Edifícios Específicos (INJETANDO HISTÓRIA E ENDEREÇO)
         mencoes_predios = []
         q_flex = re.sub(r'(.)\1+', r'\1', q_norm)
         
@@ -391,24 +471,29 @@ class VerticalizaCache:
                 for i, img in enumerate(p['floor_plan_urls'][:2]): img_strs.append(f"![Planta {i+1}]({img})")
                 for i, img in enumerate(p['historical_urls'][:2]): img_strs.append(f"![Imagem Histórica {i+1}]({img})")
                 
-                img_str_final = "\nIMAGENS (Copie os códigos Markdown caso o usuário queira ver fotos/plantas):\n" + "\n".join(img_strs) if img_strs else ""
+                img_str_final = "\nIMAGENS:\n" + "\n".join(img_strs) if img_strs else ""
                 
                 t_data = p.get('timeline', {})
                 inicio_obras = format_value(t_data.get('constructionStart'))
                 conclusao = format_value(t_data.get('completion'))
                 
                 contexto_local.append(
-                    f"\nFICHA TÉCNICA DO EDIFÍCIO '{p['nome']}':\n"
+                    f"\nDOSSIÊ COMPLETO DO EDIFÍCIO '{p['nome']}':\n"
                     f"- Localização: {p['cidade']}\n"
+                    f"- Endereço Exato: {p['endereco'] if p['endereco'] else 'Rua não informada'}\n"
                     f"- Segmento/Tipo: {p['segmento']} / {p['tipo']}\n"
                     f"- Andares: {format_value(p['andares'])}\n"
                     f"- Quartos: {format_value(p['quartos'])}\n"
                     f"- Área: {format_value(p['area'], 'm²')}\n"
                     f"- Status Atual: {p['status']}\n"
                     f"- Construtora(s): {', '.join(p['construtoras']) if p['construtoras'] else 'Não informada'}\n"
-                    f"- Arquiteto(s) Responsável: {p['arquiteto']}\n"
+                    f"- Arquiteto(s): {p['arquiteto']}\n"
+                    f"- Engenheiro Estrutural: {p['eng_estrutural'] if p['eng_estrutural'] else 'Não informado'}\n"
                     f"- Início das Obras: {inicio_obras}\n"
                     f"- Ano de Conclusão: {conclusao}\n"
+                    f"- Descrição SEO: {p['seo_desc']}\n"
+                    f"- Notas Básicas: {p['notas'] if p['notas'] else 'Nenhuma nota registrada.'}\n"
+                    f"- HISTÓRIA RICA (Artigos/Jornais): {p['historia'] if p['historia'] else 'Sem história estendida cadastrada.'}\n"
                     f"{img_str_final}"
                 )
 
@@ -422,43 +507,48 @@ def build_documents(data):
         return []
     docs = []
 
-    for c in data.get('cities', []):
-        content = f"DADOS DA CIDADE {c.get('name')} ({c.get('state')}): Fica na região {c.get('region')}."
+    cidades = data.get('cities', [])
+    if cidades:
+        c = cidades[0]
+        content = f"CIDADE {c.get('name')} ({c.get('state')}): População {c.get('population')}, PIB {c.get('gdp')}, IDH {c.get('idh', 'N/A')}. Infraestrutura inclui {c.get('infrastructure', 'N/A')}"
         docs.append(Document(page_content=sanitize_text(content)))
+    else:
+        docs.append(Document(page_content="Nenhuma cidade no contexto."))
 
     for ed in data.get('condominiums', []):
-        address = safe_json_parse(ed.get('address'))
-        neigh = address.get('neighborhood', 'Não informado')
         notas = ' '.join(ed.get('historicalNotes', []))
-        
-        content = (
-            f"EDIFÍCIO {ed.get('name')} em {ed.get('city')}, bairro {neigh}. "
-            f"História e Notas: {notas if notas else 'Sem notas históricas.'}"
-        )
-        docs.append(Document(page_content=sanitize_text(content)))
-
-    for co in data.get('constructors', []):
-        content = f"CONSTRUTORA {co.get('name')} ({co.get('city')}): Descrição e História: {co.get('description', 'Não informada')}."
+        content = f"EDIFÍCIO {ed.get('name')} em {ed.get('city')}. Notas: {notas}"
         docs.append(Document(page_content=sanitize_text(content)))
 
     return docs
 
 # =====================================================================
-# ⚡ INICIALIZAÇÃO DA IA NO STREAMLIT (Executado apenas 1x)
+# ⚡ INICIALIZAÇÃO DA IA NO STREAMLIT E FLUXO PRINCIPAL
 # =====================================================================
-@st.cache_resource(show_spinner="Preparando o motor de busca e inteligência...")
-def setup_ia_system():
-    raw_data = fetch_hygraph_data()
-    if not raw_data:
-        return None, None, None, ""
-        
-    local_cache = VerticalizaCache(raw_data)
-    cidades_nomes = [c.get('nome') for c in local_cache.cities.values()]
-    cidades_str = ', '.join(cidades_nomes) if cidades_nomes else 'Nenhuma'
+@st.cache_resource(ttl=3600, show_spinner=False)
+def setup_city_brain(nome_cidade, cidade_info):
+    """Cria um cérebro Isolado e dedicado EXCLUSIVAMENTE para a cidade solicitada."""
     
-    documentos = build_documents(raw_data)
+    raw_data = fetch_all_entities()
+    raw_data['cities'] = [cidade_info]
+    
+    cidade_slug = cidade_info.get('slug', '').lower().strip()
+    cidade_alvo_norm = remove_accents(nome_cidade.lower().strip())
+    
+    def pertence_a_cidade(item):
+        c = str(item.get('city', '')).lower().strip()
+        if not c: return False
+        return c == cidade_slug or remove_accents(c) == cidade_alvo_norm
+        
+    raw_data['condominiums'] = [ed for ed in raw_data.get('condominiums', []) if pertence_a_cidade(ed)]
+    raw_data['constructors'] = [co for co in raw_data.get('constructors', []) if pertence_a_cidade(co)]
+    raw_data['architects'] = [ar for ar in raw_data.get('architects', []) if pertence_a_cidade(ar)]
+    
+    local_cache = VerticalizaCache(raw_data)
+    
+    docs = build_documents(raw_data)
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    vectorstore = FAISS.from_documents(documentos, embeddings)
+    vectorstore = FAISS.from_documents(docs, embeddings)
     
     llm = ChatGroq(
         model_name="llama-3.1-8b-instant", 
@@ -467,32 +557,52 @@ def setup_ia_system():
         timeout=25
     )
     
-    return local_cache, vectorstore, llm, cidades_str
+    return local_cache, vectorstore, llm
 
-# =====================================================================
-# 🖥️ INTERFACE WEB E LOOP PRINCIPAL DO CHAT
-# =====================================================================
-st.title("🏛️ Verticaliza LUME")
+todas_cidades = fetch_base_cities()
 
-local_cache, vectorstore, llm, cidades_str = setup_ia_system()
-
-if not local_cache:
-    st.error("🛑 Falha crítica ao carregar dados da base do Verticaliza.")
+if not todas_cidades:
+    st.error("🛑 Falha crítica ao carregar a lista de cidades base do Verticaliza. Verifique sua chave do Hygraph.")
     st.stop()
 
-# Saudação Inicial Rica e Direta
-boas_vindas_texto = """Olá! Eu sou o **LUME**, a Inteligência Artificial do projeto **Verticaliza**. 🏢✨
+lista_nomes_cidades = [c['name'] for c in todas_cidades]
 
-Sou especialista em urbanismo, infraestrutura, cultura local e no mercado imobiliário da região. 
+with st.sidebar:
+    st.markdown("### ⚙️ Centro de Controle")
+    st.markdown("A inteligência foca em uma cidade por vez para máxima precisão.")
+    
+    if "contexto_cidade" not in st.session_state:
+        st.session_state.contexto_cidade = "Assis" if "Assis" in lista_nomes_cidades else lista_nomes_cidades[0]
+        
+    cidade_selecionada = st.selectbox("🏙️ Cidade Ativa no Radar", lista_nomes_cidades, index=lista_nomes_cidades.index(st.session_state.contexto_cidade))
+    
+    if cidade_selecionada != st.session_state.contexto_cidade:
+        st.session_state.contexto_cidade = cidade_selecionada
+        st.session_state.messages.append({"role": "assistant", "content": f"🔄 Mudei o meu radar de análise para a cidade de **{cidade_selecionada}**."})
+        st.rerun()
+        
+    st.markdown("---")
+    st.markdown("Acabou de cadastrar dados no Hygraph?")
+    if st.button("🔄 Sincronizar Hygraph AGORA"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
+
+st.title("🏛️ Verticaliza LUME")
+
+boas_vindas_texto = f"""Olá! Eu sou o **LUME**, a Inteligência Artificial do projeto **Verticaliza**. 🏢✨
+
+Atualmente, meus sensores estão focados na cidade de **{st.session_state.contexto_cidade}**.
+Sou especialista em urbanismo, infraestrutura e no mercado imobiliário da região. 
 
 Você pode me perguntar sobre:
-- 🏙️ **Edifícios:** Fichas técnicas, construtoras, andares, arquitetos responsáveis e status.
-- 🏗️ **Construtoras:** Histórico, portfólio e quantidade de obras.
-- 🌆 **Cidades:** Economia, eventos culturais, turismo, hospitais, universidades e provedores de infraestrutura.
+- 🏙️ **Edifícios:** Fichas técnicas, história, andares e construtoras.
+- 🏗️ **Construtoras:** Histórico e portfólio.
+- 🌆 **Cidades:** Economia, cultura, hospitais, universidades e provedores.
 
 *I speak English. Hablo Español. Ich spreche Deutsch.*
 
-Como posso ajudar na sua pesquisa hoje?"""
+O que você deseja saber?"""
 
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": boas_vindas_texto}]
@@ -506,47 +616,57 @@ for msg in st.session_state.messages:
 
 if pergunta := st.chat_input("👤 VOCÊ:"):
     
+    q_norm = remove_accents(pergunta.lower())
+    mudou_cidade = False
+    for cidade in lista_nomes_cidades:
+         if remove_accents(cidade.lower()) in q_norm and cidade != st.session_state.contexto_cidade:
+             st.session_state.contexto_cidade = cidade
+             st.session_state.messages.append({"role": "assistant", "content": f"🔄 Notei que você perguntou sobre **{cidade}**. Mudando meu radar para lá..."})
+             mudou_cidade = True
+             st.rerun()
+
     st.session_state.messages.append({"role": "user", "content": pergunta})
     with st.chat_message("user"):
         st.markdown(pergunta)
+
+    cidade_info = next(c for c in todas_cidades if c['name'] == st.session_state.contexto_cidade)
+    local_cache, vectorstore, llm = setup_city_brain(st.session_state.contexto_cidade, cidade_info)
 
     with st.chat_message("assistant"):
         with st.spinner("Aguarde..."):
             time.sleep(2.5)
             
             try:
-                # Expansor Inteligente com mais contexto 
                 query_expandida = pergunta
-                palavras_contexto = ['ele', 'ela', 'dele', 'dela', 'desse', 'dessa', 'quando', 'onde', 'arquiteto', 'engenheiro', 'projetou', 'plantas', 'universidade', 'faculdade', 'cultura', 'e', 'mas', 'não', 'nao', 'qual', 'quais']
-                if st.session_state.ultima_pergunta_usuario and (len(pergunta.split()) < 7 or any(p in pergunta.lower().split() for p in palavras_contexto)):
+                palavras_contexto = ['ele', 'ela', 'dele', 'dela', 'desse', 'dessa', 'quando', 'onde', 'arquiteto', 'engenheiro', 'projetou', 'plantas', 'universidade', 'faculdade', 'cultura', 'e', 'mas', 'não', 'nao', 'qual', 'quais', 'ultimo', 'ultima']
+                if st.session_state.ultima_pergunta_usuario and (len(pergunta.split()) < 7 or any(p in remove_accents(pergunta.lower()).split() for p in palavras_contexto)):
                     query_expandida = f"{st.session_state.ultima_pergunta_usuario} | {pergunta}"
 
-                # 1. PROCESSAMENTO LOCAL
                 dados_locais = local_cache.analyze_query(query_expandida)
                 
-                # 2. BUSCA SEMÂNTICA
                 contexto_semantico = ""
                 try:
-                    documentos_relevantes = vectorstore.similarity_search(query_expandida, k=3)
+                    documentos_relevantes = vectorstore.similarity_search(query_expandida, k=2)
                     contexto_semantico = "\n".join([doc.page_content for doc in documentos_relevantes])
                 except Exception:
                     pass
                 
-                # 3. PROMPT BLINDADO E REESTRUTURADO (Fim das Tags XML)
+                # 3. PROMPT BLINDADO EXTREMO (Anti-Alucinação, Anti-Narrativa e Anti-Desculpas)
                 prompt_sistema = (
-                    "Você é o LUME, a Inteligência Artificial especialista em urbanismo e mercado imobiliário do projeto Verticaliza.\n"
-                    "Aja como um consultor humano especialista. Todo o conhecimento abaixo já faz parte da sua mente.\n\n"
-                    "REGRAS DE OURO (PUNIÇÃO MÁXIMA SE DESCUMPRIDAS):\n"
-                    "1. NUNCA MENCIONE SUAS FONTES: É ESTRITAMENTE PROIBIDO usar expressões como 'De acordo com os dados', 'Na tag', 'Meus registros', 'A base de dados diz' ou 'Fui fornecido'. Responda DIRETAMENTE como um especialista (Ex: Em vez de 'Os dados dizem que tem 5 andares', diga 'O prédio tem 5 andares').\n"
-                    "2. ALUCINAÇÃO ZERO: Não invente cursos de universidades, estilos arquitetônicos, festas, características de prédios ou prazos que não estejam explicitamente listados no SEU CONHECIMENTO abaixo. Se não souber, diga apenas: 'Ainda não possuo essa informação catalogada.'\n"
-                    "3. IDIOMA: Responda em Português do Brasil (proibido usar 'tu', 'fizestes', 'tens').\n"
-                    "4. IMAGENS: Se o contexto fornecer um código Markdown de imagem (ex: ![Texto](url)), copie-o EXATAMENTE para a sua resposta. Não invente imagens ou crie links do Google.\n"
-                    "5. RANKINGS E OBRAS: Se o usuário pedir maiores/antigos, cite EXATAMENTE as listas fornecidas abaixo, sem inventar ou suprimir informações listadas.\n\n"
-                    "--- SEU CONHECIMENTO ---\n"
-                    f"CIDADES DE ATUAÇÃO: {cidades_str}.\n"
+                    f"Você é o LUME, a Inteligência Artificial especialista em urbanismo e mercado imobiliário. Seu radar atual está travado em {st.session_state.contexto_cidade}.\n"
+                    "Aja como um consultor humano direto, seco e estritamente baseado nos fatos listados. O dossiê abaixo representa TODO o seu conhecimento do universo.\n\n"
+                    "REGRAS DE CONDUTA (PUNIÇÃO MÁXIMA SE DESCUMPRIDAS):\n"
+                    "1. NUNCA MENCIONE SUAS FONTES: É ESTRITAMENTE PROIBIDO usar palavras como 'CMS', 'Hygraph', 'Banco de dados', 'De acordo com as informações', 'Nos meus registros' ou 'Na tag'. Apenas responda os fatos.\n"
+                    "2. PROIBIDO CRIAR NARRATIVAS (ANTI-YAPPING): Não use adjetivos para enfeitar a resposta. Não invente que um prédio é 'luxuoso', 'único', 'marco da arquitetura' ou possui 'piscina', a menos que isso esteja EXPLICITAMENTE ESCRITO no Dossiê abaixo. Se pedirem sobre as obras de uma construtora, apenas liste o que lhe foi fornecido.\n"
+                    "3. ALUCINAÇÃO ZERO PARA DADOS VAZIOS: Se no Dossiê estiver escrito '[DADO NÃO CATALOGADO]', você É OBRIGADO a responder: 'O projeto Verticaliza ainda não catalogou essa informação detalhada.' É EXPRESSAMENTE PROIBIDO inventar festas, eventos culturais ou nomes de cursos universitários.\n"
+                    "4. PROIBIDO PEDIR DESCULPAS: Se o usuário ofender, xingar ou corrigir você, NUNCA peça desculpas. Apenas diga 'Entendido. Atualizando a informação:' e continue com os dados.\n"
+                    "5. TRATAMENTO DE INSTITUIÇÕES: Se o usuário perguntar sobre uma faculdade/universidade e não houver um texto rico, diga apenas que compõe a infraestrutura da cidade.\n"
+                    "6. IMAGENS E IDIOMA: Responda em Português do Brasil (sem usar 'tu' ou 'fizestes'). Mantenha fielmente os blocos Markdown de imagens do Dossiê, não crie links falsos.\n\n"
+                    "--- INÍCIO DO SEU CONHECIMENTO ---\n"
                     f"{dados_locais if dados_locais else ''}\n"
-                    f"{contexto_semantico if contexto_semantico else ''}\n"
-                    "--------------------------"
+                    f"FRAGMENTOS ADICIONAIS:\n"
+                    f"{contexto_semantico if contexto_semantico else 'Nenhum'}\n"
+                    "--- FIM DO SEU CONHECIMENTO ---"
                 )
                 
                 mensagens = [SystemMessage(content=prompt_sistema)]
@@ -554,7 +674,7 @@ if pergunta := st.chat_input("👤 VOCÊ:"):
                 for msg in st.session_state.messages[-5:]:
                     if msg["role"] == "user":
                         mensagens.append(HumanMessage(content=msg["content"]))
-                    elif msg["role"] == "assistant" and not "🏢✨" in msg["content"]:
+                    elif msg["role"] == "assistant" and not "🏢✨" in msg["content"] and not "🔄" in msg["content"]:
                         mensagens.append(AIMessage(content=msg["content"]))
                 
                 resposta = llm.invoke(mensagens)
